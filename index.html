@@ -1,1 +1,201 @@
-hi
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <link rel="stylesheet" href="css/style.css">
+    <title>Mixed Reality Image Manipulation</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        header {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .xr-button {
+            background-color: #007bff;
+            color: #ffffff;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        .xr-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <button class="xr-button" id="enter-ar">Enter AR</button>
+    </header>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.140.0/examples/jsm/webxr/VRButton.js"></script>
+    <script>
+        let scene, camera, renderer, imageMesh;
+        let raycaster = new THREE.Raycaster();
+        let selectedCorner = null;
+        let corners = [];
+        let controller, controllerGrip;
+
+        init();
+        animate();
+
+        function init() {
+            // Szene und Kamera initialisieren
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.6, 3);  // Höhe etwa auf Augenhöhe einstellen
+
+            // Renderer initialisieren
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;  // WebXR aktivieren
+            document.body.appendChild(renderer.domElement);
+            document.body.appendChild(VRButton.createButton(renderer));
+
+            // Bodenebene hinzufügen
+            let floorGeometry = new THREE.PlaneGeometry(10, 10);
+            let floorMaterial = new THREE.MeshBasicMaterial({ color: 0xcccccc, side: THREE.DoubleSide });
+            let floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = - Math.PI / 2;
+            scene.add(floor);
+
+            // Bildmaterial mit Transparenz erstellen
+            let textureLoader = new THREE.TextureLoader();
+            let texture = textureLoader.load('your-image-url.jpg', createShaderMaterial);
+
+            function createShaderMaterial(texture) {
+                const material = new THREE.ShaderMaterial({
+                    uniforms: {
+                        uTexture: { value: texture },
+                        uOpacity: { value: 0.3 }
+                    },
+                    vertexShader: `
+                        varying vec2 vUv;
+                        void main() {
+                            vUv = uv;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                        }
+                    `,
+                    fragmentShader: `
+                        uniform sampler2D uTexture;
+                        uniform float uOpacity;
+                        varying vec2 vUv;
+                        void main() {
+                            vec4 texColor = texture2D(uTexture, vUv);
+                            float alpha = 1.0 - texColor.r; // Schwarze Bereiche anzeigen
+                            if (texColor.r < 0.5) {
+                                gl_FragColor = vec4(texColor.rgb, alpha * uOpacity);
+                            } else {
+                                discard; // Weiße Bereiche ignorieren
+                            }
+                        }
+                    `,
+                    transparent: true
+                });
+
+                let geometry = new THREE.PlaneGeometry(4, 4);
+                imageMesh = new THREE.Mesh(geometry, material);
+                imageMesh.rotation.x = -Math.PI / 2;  // Flach auf dem Boden
+                scene.add(imageMesh);
+
+                // Ecken zum Ziehen erstellen
+                createCorners();
+            }
+
+            // Controller für Interaktion einrichten
+            controller = renderer.xr.getController(0);
+            controller.addEventListener('selectstart', onSelectStart);
+            controller.addEventListener('selectend', onSelectEnd);
+            scene.add(controller);
+
+            controllerGrip = renderer.xr.getControllerGrip(0);
+            scene.add(controllerGrip);
+
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function createCorners() {
+            const cornerGeometry = new THREE.SphereGeometry(0.05);
+            const cornerMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+
+            for (let i = 0; i < 4; i++) {
+                const corner = new THREE.Mesh(cornerGeometry, cornerMaterial);
+                corners.push(corner);
+                scene.add(corner);
+            }
+            updateCornersPosition();
+        }
+
+        function updateCornersPosition() {
+            let positions = imageMesh.geometry.attributes.position.array;
+            for (let i = 0; i < 4; i++) {
+                corners[i].position.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+                corners[i].position.applyMatrix4(imageMesh.matrixWorld);
+            }
+        }
+
+        function onSelectStart(event) {
+            const controller = event.target;
+            const intersections = getIntersections(controller);
+            if (intersections.length > 0) {
+                selectedCorner = intersections[0].object;
+            }
+        }
+
+        function onSelectEnd(event) {
+            selectedCorner = null;
+        }
+
+        function getIntersections(controller) {
+            const tempMatrix = new THREE.Matrix4();
+            tempMatrix.identity().extractRotation(controller.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+            return raycaster.intersectObjects(corners);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function render() {
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
